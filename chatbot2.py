@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 import threading
+import re
 
 # -------------------- Setup & Configuration --------------------
 # This is a temporary directory where the GitHub repository will be cloned.
@@ -134,6 +135,7 @@ class QAChatbotGUI(tk.Tk):
         self.repo_path = None
         self.framework = "unknown"
         self.files = []
+        self.test_url = ""
 
         # UI elements setup
         self.create_widgets()
@@ -148,6 +150,13 @@ class QAChatbotGUI(tk.Tk):
         self.url_entry.pack(side=tk.LEFT, padx=5)
         tk.Button(url_frame, text="Clone & Analyze", command=self.clone_and_detect).pack(side=tk.LEFT)
 
+        # New label and entry for overriding the test URL
+        url_override_frame = tk.Frame(self)
+        url_override_frame.pack(pady=5)
+        tk.Label(url_override_frame, text="Override Test URL:").pack(side=tk.LEFT, padx=5)
+        self.url_override_entry = tk.Entry(url_override_frame, width=60)
+        self.url_override_entry.pack(side=tk.LEFT, padx=5)
+        
         # Frame for output area
         output_frame = tk.Frame(self)
         output_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -188,6 +197,44 @@ class QAChatbotGUI(tk.Tk):
         
         if not self.files:
             self.output.insert(tk.END, "No test files found. Make sure the repository contains relevant files.\n")
+        
+        # This is where we attempt to detect the URL from a common file.
+        # This is a heuristic and may not work for all projects.
+        self.test_url = ""
+        try:
+            # Check for a package.json file first for JavaScript projects
+            pkg_path = os.path.join(self.repo_path, "package.json")
+            if os.path.exists(pkg_path):
+                with open(pkg_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    if "cypress" in content:
+                        import json
+                        pkg_data = json.loads(content)
+                        self.test_url = pkg_data.get("cypress", {}).get("baseUrl", "")
+            
+            # As a fallback, try to find a URL in any common test file
+            if not self.test_url:
+                for f in self.files:
+                    if f.endswith((".py", ".js", ".ts", ".java")):
+                        with open(os.path.join(self.repo_path, f), "r", encoding="utf-8", errors="ignore") as file:
+                            for line in file:
+                                if "http" in line or "https" in line:
+                                    # Simple heuristic: find a URL in a line
+                                    url_start = line.find("http")
+                                    if url_start != -1:
+                                        # Use a regular expression to find a valid URL
+                                        import re
+                                        match = re.search(r'(https?://[^\s/$.?#].[^\s]*)', line)
+                                        if match:
+                                            self.test_url = match.group(0).split('"')[0].split("'")[0]
+                                            break
+            
+            # Populate the new entry field with the detected URL
+            if self.test_url:
+                self.url_override_entry.delete(0, tk.END)
+                self.url_override_entry.insert(0, self.test_url)
+        except Exception:
+            pass # Ignore any errors during detection
 
     def run_selected_file(self):
         """Determines the correct command to run the selected file and executes it."""
@@ -205,6 +252,32 @@ class QAChatbotGUI(tk.Tk):
         
         self.output.insert(tk.END, f"Running {file_to_run}...\n")
         self.update()
+
+        override_url = self.url_override_entry.get().strip()
+        original_url_in_code = self.test_url
+        
+        # --- NEW URL OVERRIDE LOGIC ---
+        # Only perform the file modification if an override URL is provided.
+        if override_url and override_url != original_url_in_code and original_url_in_code:
+            try:
+                with open(abs_file, 'r', encoding='utf-8') as file:
+                    content = file.read()
+                
+                # Replace the hardcoded URL with the new one.
+                # Use re.escape to handle any special characters in the URL string.
+                # The regex will find the exact hardcoded URL and replace it.
+                new_content = re.sub(re.escape(original_url_in_code), override_url, content)
+                
+                with open(abs_file, 'w', encoding='utf-8') as file:
+                    file.write(new_content)
+                
+                self.output.insert(tk.END, f"✅ URL override applied: {original_url_in_code} -> {override_url}\n")
+                self.update()
+            except Exception as e:
+                messagebox.showerror("URL Override Failed", f"Could not modify file for URL override: {e}")
+                self.output.insert(tk.END, "❌ URL override failed. Running with hardcoded URL.\n")
+                self.update()
+        # --- END OF NEW LOGIC ---
         
         # Determine command based on detected framework
         cmd = []
